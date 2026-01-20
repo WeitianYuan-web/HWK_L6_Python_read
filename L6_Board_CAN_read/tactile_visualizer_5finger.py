@@ -65,16 +65,16 @@ class VisualConfig:
     """
     # 窗口配置
     WINDOW_WIDTH = 1600
-    WINDOW_HEIGHT = 700
+    WINDOW_HEIGHT = 750
     FPS = 60                   # 目标帧率
     
     # 热力图配置
-    CELL_SIZE = 16             # 单元格大小(像素)
-    CELL_MARGIN = 1            # 单元格间距
+    CELL_SIZE = 32             # 单元格大小(像素) - 增大显示
+    CELL_MARGIN = 2            # 单元格间距
     HEATMAP_MARGIN = 20        # 热力图外边距
     
     # 手指热力图布局
-    FINGER_SPACING = 20        # 手指热力图间距
+    FINGER_SPACING = 30        # 手指热力图间距
     
     # 颜色配置 (R, G, B)
     BG_COLOR = (30, 30, 40)
@@ -423,10 +423,11 @@ class TactileVisualizer:
         self._calculate_layout()
         
         # 预渲染表面(用于双缓冲优化)
+        # 旋转后：宽度=6(原行数)，高度=12(原列数)
         self._finger_surfaces = [
             self.pygame.Surface((
-                CANConfig.MATRIX_COLS * (VisualConfig.CELL_SIZE + VisualConfig.CELL_MARGIN),
-                CANConfig.MATRIX_ROWS * (VisualConfig.CELL_SIZE + VisualConfig.CELL_MARGIN)
+                CANConfig.MATRIX_ROWS * (VisualConfig.CELL_SIZE + VisualConfig.CELL_MARGIN),
+                CANConfig.MATRIX_COLS * (VisualConfig.CELL_SIZE + VisualConfig.CELL_MARGIN)
             ))
             for _ in range(CANConfig.NUM_FINGERS)
         ]
@@ -478,10 +479,13 @@ class TactileVisualizer:
     def _calculate_layout(self):
         """
         @brief 计算热力图布局位置
+        @details 矩阵顺时针旋转90度后，原6行×12列变为12行×6列
+                 显示宽度=6列，显示高度=12行
         """
-        # 单个热力图尺寸
-        heatmap_width = CANConfig.MATRIX_COLS * (VisualConfig.CELL_SIZE + VisualConfig.CELL_MARGIN)
-        heatmap_height = CANConfig.MATRIX_ROWS * (VisualConfig.CELL_SIZE + VisualConfig.CELL_MARGIN)
+        # 旋转后的热力图尺寸 (原6×12 -> 旋转后显示为12行×6列)
+        # 宽度对应6列，高度对应12行
+        heatmap_width = CANConfig.MATRIX_ROWS * (VisualConfig.CELL_SIZE + VisualConfig.CELL_MARGIN)
+        heatmap_height = CANConfig.MATRIX_COLS * (VisualConfig.CELL_SIZE + VisualConfig.CELL_MARGIN)
         
         # 计算5个热力图的总宽度
         total_width = 5 * heatmap_width + 4 * VisualConfig.FINGER_SPACING
@@ -506,15 +510,25 @@ class TactileVisualizer:
         @brief 在指定surface上绘制热力图
         @param surface pygame Surface
         @param matrix 6×12数据矩阵
+        @details 将矩阵顺时针旋转90度后再左右镜像
+                 原矩阵6行×12列 -> 旋转后12行×6列 -> 左右镜像
         """
         surface.fill(VisualConfig.BG_COLOR)
+        
+        # 顺时针旋转90度: np.rot90(matrix, k=-1) 或 k=3
+        rotated = np.rot90(matrix, k=-1)
+        # 左右镜像
+        rotated = np.fliplr(rotated)
         
         cell_size = VisualConfig.CELL_SIZE
         margin = VisualConfig.CELL_MARGIN
         
-        for row in range(CANConfig.MATRIX_ROWS):
-            for col in range(CANConfig.MATRIX_COLS):
-                value = matrix[row, col]
+        # 旋转后的矩阵尺寸: 12行 × 6列
+        rotated_rows, rotated_cols = rotated.shape
+        
+        for row in range(rotated_rows):
+            for col in range(rotated_cols):
+                value = rotated[row, col]
                 color = self.colormap[value]
                 
                 x = col * (cell_size + margin)
@@ -557,10 +571,10 @@ class TactileVisualizer:
         """
         @brief 绘制颜色条
         """
-        bar_width = 20
-        bar_height = 200
+        bar_width = 25
+        bar_height = self.heatmap_height  # 与热力图等高
         x = VisualConfig.WINDOW_WIDTH - 80
-        y = 150
+        y = self.finger_positions[0][1]   # 与热力图顶部对齐
         
         # 绘制颜色条
         for i in range(bar_height):
