@@ -829,7 +829,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='五指触觉传感器可视化')
-    parser.add_argument('--hand', type=int, default=0, choices=[0, 1],
+    parser.add_argument('--hand', type=int, default=1, choices=[0, 1],
                         help='选择手: 0=左手, 1=右手 (默认: 0)')
     parser.add_argument('--channel', type=str, default=None,
                         help='CAN通道 (默认: PCAN_USBBUS1)')

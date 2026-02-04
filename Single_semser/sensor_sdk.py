@@ -586,7 +586,7 @@ def demo_console():
     print("=" * 60)
     
     # 使用固定端口
-    port = 'COM60'
+    port = 'COM7'
     print(f"使用端口: {port}")
     print("开始以30Hz频率持续读取，按 Ctrl+C 退出...")
     
@@ -633,7 +633,7 @@ def demo_realtime():
     import sys
     
     # 使用固定端口
-    port = 'COM60'
+    port = 'COM7'
     print(f"使用端口: {port}")
     
     update_func, close_func = MatrixVisualizer.create_matplotlib_visualizer()
@@ -670,7 +670,7 @@ def demo_multi_sensor():
     import sys
     
     # 使用固定端口
-    port = 'COM60'
+    port = 'COM7'
     print(f"使用端口: {port}")
     
     # 5个传感器的设备ID

@@ -95,10 +95,10 @@ class ControlConfig:
     JOINT_ANGLE_RANGES = [
         (177.0, 236.0),
         (126.0, 190.0),
-        (183.0, 264.0),
-        (188.0, 265.0),
-        (178.0, 258.0),
-        (190.0, 267.0),
+        (180.0, 264.0),
+        (184.0, 265.0),
+        (175.0, 258.0),
+        (188.0, 267.0),
     ]
     
     # 关节反向配置
@@ -1333,7 +1333,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='触觉传感器与机械手控制集成系统')
-    parser.add_argument('--hand', type=int, default=0, choices=[0, 1],
+    parser.add_argument('--hand', type=int, default=1, choices=[0, 1],
                         help='选择手: 0=左手, 1=右手')
     parser.add_argument('--channel', type=str, default=None,
                         help='CAN通道')
