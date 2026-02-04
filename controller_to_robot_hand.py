@@ -73,15 +73,20 @@ FILTER_ALPHA = 0.3                # 滤波系数（0-1），越小越平滑但�
 
 def normalize_angle(angle: float) -> float:
     """
-    @brief 将角度归一化到0-360度范围
+    @brief 将原始角度限制在[-360°, 720°]范围内
+    
+    @details 控制器当前输出的原始角度工作空间为[-360°, 720°]。
+             本函数只做“裁剪”，不再按360度做周期性折返，
+             后续的关节映射逻辑直接在这个连续角度空间内工作。
     
     @param angle 输入角度
-    @return 归一化后的角度（0-360）
+    @return 裁剪后的角度（仍在[-360°, 720°]空间内）
     """
-    while angle < 0:
-        angle += 360.0
-    while angle >= 360:
-        angle -= 360.0
+    # 限制在物理给定的原始角度范围，避免异常值
+    if angle < -360.0:
+        angle = -360.0
+    elif angle > 720.0:
+        angle = 720.0
     return angle
 
 
@@ -89,13 +94,14 @@ def map_angle_to_position(angle: float, angle_min: float, angle_max: float, reve
     """
     @brief 将角度值线性映射到关节位置（0-1023）
     
-    处理跨越0度的环绕情况：
-    - 如果 angle_min < angle_max: 正常映射
-    - 如果 angle_min > angle_max: 跨越0度，例如350-30度
-    
-    反向映射：
-    - 正向(reversed=False): angle_min→0, angle_max→1023
-    - 反向(reversed=True):  angle_min→1023, angle_max→0
+    @details 在统一的连续角度空间[-360°, 720°]内进行线性映射：
+             - 先用 normalize_angle 将输入角度裁剪到[-360°, 720°]
+             - 再在 [angle_min, angle_max] 上做线性插值
+             - angle_min/angle_max 同样可以取在[-360°, 720°]范围内
+             - 如果角度超出[min, max]，则在两端钳位
+             反向映射：
+             - 正向(reversed=False): angle_min→0, angle_max→1023
+             - 反向(reversed=True):  angle_min→1023, angle_max→0
     
     @param angle 当前角度（0-360）
     @param angle_min 角度范围最小值
@@ -103,36 +109,16 @@ def map_angle_to_position(angle: float, angle_min: float, angle_max: float, reve
     @param reversed 是否反向映射
     @return 映射后的关节位置（0-1023）
     """
-    # 归一化输入角度
+    # 将输入角度裁剪到统一工作空间
     angle = normalize_angle(angle)
-    
-    # 判断是否跨越0度
-    is_wraparound = angle_min > angle_max
-    
-    if is_wraparound:
-        # 跨越0度的情况，例如 350-30度
-        # 将角度范围转换为 [angle_min, 360) + [0, angle_max]
-        if angle >= angle_min:
-            # 角度在 [angle_min, 360) 范围内
-            normalized = angle - angle_min
-            range_span = (360.0 - angle_min) + angle_max
-        else:
-            # 角度在 [0, angle_max] 范围内
-            normalized = (360.0 - angle_min) + angle
-            range_span = (360.0 - angle_min) + angle_max
-        
-        # 限制在有效范围内
-        if angle < angle_max or angle >= angle_min:
-            # 在有效范围内
-            ratio = normalized / range_span
-        else:
-            # 超出范围，钳位到边界
-            if abs(angle - angle_max) < abs(angle - angle_min):
-                ratio = 1.0  # 靠近最大值
-            else:
-                ratio = 0.0  # 靠近最小值
+    # 允许配置的最小/最大角度也在该空间内
+    angle_min = normalize_angle(angle_min)
+    angle_max = normalize_angle(angle_max)
+
+    # 避免除零：当最小角度和最大角度非常接近时，视为常量映射
+    if abs(angle_max - angle_min) < 1e-6:
+        ratio = 0.0
     else:
-        # 正常情况，angle_min < angle_max
         if angle <= angle_min:
             ratio = 0.0
         elif angle >= angle_max:

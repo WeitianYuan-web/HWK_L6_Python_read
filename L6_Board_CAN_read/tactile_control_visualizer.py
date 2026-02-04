@@ -74,7 +74,7 @@ class SerialConfig:
     """
     @brief 串口配置常量
     """
-    PORT = 'COM61'
+    PORT = 'COM69'
     BAUDRATE = 115200
     TIMEOUT = 0.1
     PACKET_SIZE = 28
@@ -93,12 +93,12 @@ class ControlConfig:
     
     # 关节角度范围 [最小角度, 最大角度]
     JOINT_ANGLE_RANGES = [
-        (177.0, 236.0),
-        (126.0, 190.0),
-        (180.0, 264.0),
-        (184.0, 265.0),
-        (175.0, 258.0),
-        (188.0, 267.0),
+        (298.0, 372.0),
+        (216.0, 276.0),
+        (-24.0, 60.0),
+        (-57.0, 28.0),
+        (200.0, 265.0),
+        (1.0, 30.0),
     ]
     
     # 关节反向配置
@@ -628,12 +628,16 @@ class ControllerReader:
 
 def normalize_angle(angle: float) -> float:
     """
-    @brief 将角度归一化到0-360度范围
+    @brief 将原始角度限制在[-360°, 720°]范围内
+    @details 控制器输出的原始角度工作空间为[-360°, 720°]。
+             本函数只做“裁剪”，不再按360度做周期性折返，
+             后续的关节映射逻辑直接在这个连续角度空间内工作。
     """
-    while angle < 0:
-        angle += 360.0
-    while angle >= 360:
-        angle -= 360.0
+    # 先限制在物理给定的原始角度范围，避免异常值带来跳变
+    if angle < -360.0:
+        angle = -360.0
+    elif angle > 720.0:
+        angle = 720.0
     return angle
 
 
@@ -641,24 +645,14 @@ def map_angle_to_position(angle: float, angle_min: float, angle_max: float, reve
     """
     @brief 将角度值映射到关节位置
     """
+    # 将输入角度以及配置范围裁剪到统一工作空间[-360°, 720°]
     angle = normalize_angle(angle)
-    is_wraparound = angle_min > angle_max
-    
-    if is_wraparound:
-        if angle >= angle_min:
-            normalized = angle - angle_min
-            range_span = (360.0 - angle_min) + angle_max
-        else:
-            normalized = (360.0 - angle_min) + angle
-            range_span = (360.0 - angle_min) + angle_max
-        
-        if angle < angle_max or angle >= angle_min:
-            ratio = normalized / range_span
-        else:
-            if abs(angle - angle_max) < abs(angle - angle_min):
-                ratio = 1.0
-            else:
-                ratio = 0.0
+    angle_min = normalize_angle(angle_min)
+    angle_max = normalize_angle(angle_max)
+
+    # 避免除零：当最小角度和最大角度非常接近时，视为常量映射
+    if abs(angle_max - angle_min) < 1e-6:
+        ratio = 0.0
     else:
         if angle <= angle_min:
             ratio = 0.0
