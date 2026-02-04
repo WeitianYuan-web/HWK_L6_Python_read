@@ -93,16 +93,16 @@ class ControlConfig:
     
     # 关节角度范围 [最小角度, 最大角度]
     JOINT_ANGLE_RANGES = [
-        (298.0, 372.0),
-        (216.0, 276.0),
+        (280.0, 382.0),
+        (222.0, 276.0),
         (-24.0, 60.0),
         (-57.0, 28.0),
-        (200.0, 265.0),
-        (1.0, 30.0),
+        (200.0, 271.0),
+        (-10.0, 40.0),
     ]
     
     # 关节反向配置
-    JOINT_REVERSED = [False, True, True, True, True, True]
+    JOINT_REVERSED = [True, True, False, False, False, False]
     
     JOINT_POS_MIN = 0
     JOINT_POS_MAX = 1023
