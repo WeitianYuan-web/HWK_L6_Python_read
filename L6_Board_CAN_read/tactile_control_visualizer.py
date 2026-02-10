@@ -3,19 +3,38 @@
 """
 @file tactile_control_visualizer.py
 @brief 五指触觉传感器可视化与机械手控制集成程序
-@details 共用一个CAN总线，实现：
+@details 使用两个独立的CAN总线，实现：
+         
+         【CAN总线1】机械手和触觉传感器 (默认: PCAN_USBBUS1):
          1. 触觉传感器数据接收与可视化 (CAN ID: 0x300-0x348 左手 / 0x400-0x448 右手)
          2. 机械手控制命令发送 (CAN ID: 0x30-0x3F 左手控制 / 0x50-0x5F 右手控制)
          3. 机械手反馈数据接收与显示 (CAN ID: 0x40-0x4F 左手反馈 / 0x60-0x6F 右手反馈)
-         4. USB控制器数据读取与映射
+         
+         【CAN总线2】无刷拉力模块 (默认: PCAN_USBBUS2):
+         4. 无刷拉力模块控制 (CAN ID: 0x200拉力命令 / 0x201位置命令)
+         
+         【USB串口】控制器输入:
+         5. USB控制器数据读取与映射
 
-@version 1.0
-@date 2026-01-20
+@version 1.1
+@date 2026-02-05
 
 CAN协议说明:
+【CAN1 - 机械手和触觉传感器】
 - 触觉传感器: 0xHmn (H=3左手/4右手, m=手指ID, n=帧序号)
 - 机械手控制: 0x3n左手 / 0x5n右手 (n=数据类型)
 - 机械手反馈: 0x4n左手 / 0x6n右手 (n=数据类型)
+
+【CAN2 - 无刷拉力模块】
+- 拉力命令: 0x200 (5字节，对应5个手指模块)
+- 位置命令: 0x201 (5字节，对应5个手指模块)
+- 反馈数据: 0x20-0x24 (每个模块2字节反馈)
+
+无刷拉力模块控制算法:
+- 拉力命令 = (触觉传感器归一化 * 0.8 + 关节电流归一化 * 0.2) * 255
+  * 触觉传感器: 最大值作为1归一化
+  * 关节电流: 512作为0，0作为1
+- 位置命令 = 关节位置归一化(0-1) * (255-50) + 50
 """
 
 import can
@@ -34,6 +53,9 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from can_robot_hand_sdk import CANProtocol, JointData, DataType, pack_joint_data, unpack_joint_data
 
+# 导入无刷拉力模块SDK（项目根已加入 path，直接按包导入便于 IDE 解析）
+from brushless_tension.brushless_tension_sdk import BrushlessTensionSDK
+
 
 # ============================================================================
 # 配置类
@@ -43,9 +65,15 @@ class CANConfig:
     """
     @brief CAN配置常量
     """
+    # 机械手和触觉传感器CAN通道
     CHANNEL = 'PCAN_USBBUS1'
     INTERFACE = 'pcan'
     BITRATE = 1000000
+    
+    # 无刷拉力模块CAN通道（独立的CAN接口）
+    TENSION_CHANNEL = 'PCAN_USBBUS2'
+    TENSION_INTERFACE = 'pcan'
+    TENSION_BITRATE = 1000000
     
     # 触觉传感器帧配置
     FRAMES_PER_FINGER = 9
@@ -106,6 +134,14 @@ class ControlConfig:
     
     JOINT_POS_MIN = 0
     JOINT_POS_MAX = 1023
+    
+    # 无刷拉力模块配置
+    TENSION_TACTILE_WEIGHT = 0.8      # 触觉传感器权重
+    TENSION_CURRENT_WEIGHT = 0.2      # 关节电流权重
+    TENSION_CURRENT_ZERO = 512        # 关节电流零点
+    TENSION_CURRENT_MAX = 0           # 关节电流最大值（对应归一化1）
+    TENSION_POS_MIN = 50              # 位置命令最小值
+    TENSION_POS_MAX = 255             # 位置命令最大值
 
 
 class VisualConfig:
@@ -694,9 +730,11 @@ class IntegratedVisualizer:
              控制逻辑在独立高频线程中运行
     """
     
-    def __init__(self, can_manager: UnifiedCANManager, controller: Optional[ControllerReader] = None):
+    def __init__(self, can_manager: UnifiedCANManager, controller: Optional[ControllerReader] = None,
+                 tension_sdk: Optional[BrushlessTensionSDK] = None):
         self.can_manager = can_manager
         self.controller = controller
+        self.tension_sdk = tension_sdk
         
         try:
             import pygame
@@ -740,9 +778,87 @@ class IntegratedVisualizer:
         self._control_count = 0
         self._control_start_time = time.time()
         
+        # 无刷拉力模块相关
+        self._last_tension_commands = [0] * 5
+        self._last_tension_positions = [0] * 5
+        
         # 独立控制线程
         self._control_thread: Optional[threading.Thread] = None
         self._control_running = False
+    
+    def _calculate_tension_commands(self, tactile_data: List[FingerData], 
+                                    robot_feedback: RobotHandFeedback) -> List[int]:
+        """
+        @brief 计算拉力命令
+        @details 公式: tension = (tactile_normalized * 0.8 + current_normalized * 0.2) * 255
+                 - 触觉传感器: 最大值归一化为1
+                 - 关节电流: 512作为0，0作为1
+        @param tactile_data 五个手指的触觉数据
+        @param robot_feedback 机械手反馈数据（包含电流）
+        @return 五个拉力命令值 (0-255)
+        """
+        tension_commands = []
+        
+        for i in range(5):
+            # 触觉传感器归一化 (最大值为1)
+            if tactile_data[i].valid and tactile_data[i].matrix.size > 0:
+                tactile_max = tactile_data[i].matrix.max()
+                tactile_normalized = tactile_max / 255.0
+            else:
+                tactile_normalized = 0.0
+            
+            # 关节电流归一化 (512作为0，0作为1)
+            # 这里假设 torque 字段代表电流
+            if i < len(robot_feedback.torque):
+                current_raw = robot_feedback.torque[i]
+                # 将512映射到0，0映射到1
+                if current_raw <= ControlConfig.TENSION_CURRENT_ZERO:
+                    current_normalized = 1.0 - (current_raw / ControlConfig.TENSION_CURRENT_ZERO)
+                else:
+                    # 如果电流大于512，则归一化为0
+                    current_normalized = 0.0
+                current_normalized = max(0.0, min(1.0, current_normalized))
+            else:
+                current_normalized = 0.0
+            
+            # 加权求和
+            combined = (tactile_normalized * ControlConfig.TENSION_TACTILE_WEIGHT + 
+                       current_normalized * ControlConfig.TENSION_CURRENT_WEIGHT)
+            
+            # 映射到0-255
+            tension_cmd = int(combined * 255)
+            tension_cmd = max(0, min(255, tension_cmd))
+            tension_commands.append(tension_cmd)
+        
+        return tension_commands
+    
+    def _calculate_tension_positions(self, robot_feedback: RobotHandFeedback) -> List[int]:
+        """
+        @brief 计算位置命令
+        @details 关节位置归一化到0-1后线性映射到50-255
+        @param robot_feedback 机械手反馈数据（包含位置）
+        @return 五个位置命令值 (50-255)
+        """
+        position_commands = []
+        
+        # 只使用前5个关节位置（对应5个手指）
+        for i in range(5):
+            if i < len(robot_feedback.position):
+                pos_raw = robot_feedback.position[i]
+                # 归一化到0-1
+                pos_normalized = pos_raw / float(ControlConfig.JOINT_POS_MAX)
+                pos_normalized = max(0.0, min(1.0, pos_normalized))
+                
+                # 映射到50-255
+                pos_cmd = int(pos_normalized * (ControlConfig.TENSION_POS_MAX - ControlConfig.TENSION_POS_MIN) + 
+                             ControlConfig.TENSION_POS_MIN)
+                pos_cmd = max(ControlConfig.TENSION_POS_MIN, min(ControlConfig.TENSION_POS_MAX, pos_cmd))
+            else:
+                pos_cmd = ControlConfig.TENSION_POS_MIN
+            
+            position_commands.append(pos_cmd)
+        
+        return position_commands
     
     def _init_fonts(self):
         """
@@ -972,6 +1088,8 @@ class IntegratedVisualizer:
         with self._control_lock:
             angles = self._controller_angles.copy()
             positions = self._last_positions.copy()
+            tension_commands = self._last_tension_commands.copy()
+            tension_positions = self._last_tension_positions.copy()
         
         # 角度和位置值
         angles_text = "角度: " + " | ".join([f"J{i}:{angles[i]:.1f}°" for i in range(6)])
@@ -983,6 +1101,18 @@ class IntegratedVisualizer:
         pos_surface = self.font_small.render(pos_text, True, VisualConfig.TEXT_COLOR)
         pos_rect = pos_surface.get_rect(centerx=VisualConfig.WINDOW_WIDTH // 2, y=y + 45)
         self.screen.blit(pos_surface, pos_rect)
+        
+        # 如果启用了拉力模块，显示拉力命令
+        if self.tension_sdk and self.tension_sdk.is_connected():
+            tension_text = "拉力: " + " | ".join([f"F{i}:{tension_commands[i]}" for i in range(5)])
+            tension_surface = self.font_small.render(tension_text, True, (255, 200, 100))
+            tension_rect = tension_surface.get_rect(centerx=VisualConfig.WINDOW_WIDTH // 2, y=y + 65)
+            self.screen.blit(tension_surface, tension_rect)
+            
+            tension_pos_text = "拉力位置: " + " | ".join([f"F{i}:{tension_positions[i]}" for i in range(5)])
+            tension_pos_surface = self.font_small.render(tension_pos_text, True, (100, 200, 255))
+            tension_pos_rect = tension_pos_surface.get_rect(centerx=VisualConfig.WINDOW_WIDTH // 2, y=y + 85)
+            self.screen.blit(tension_pos_surface, tension_pos_rect)
     
     def _draw_colorbar(self):
         """
@@ -1072,8 +1202,30 @@ class IntegratedVisualizer:
                 if angles:
                     positions = map_angles_to_positions(angles)
                     
-                    # 发送控制命令
+                    # 发送机械手控制命令
                     self.can_manager.send_control(position=positions)
+                    
+                    # 如果启用了无刷拉力模块，计算并发送拉力命令
+                    if self.tension_sdk and self.tension_sdk.is_connected():
+                        # 获取触觉传感器数据和机械手反馈
+                        tactile_data = self.can_manager.get_all_fingers_data()
+                        robot_feedback = self.can_manager.get_robot_feedback()
+                        
+                        # 计算拉力命令
+                        tension_commands = self._calculate_tension_commands(tactile_data, robot_feedback)
+                        
+                        # 计算位置命令
+                        tension_positions = self._calculate_tension_positions(robot_feedback)
+                        
+                        # 发送拉力和位置命令
+                        self.tension_sdk.send_tension_frame(tension_commands)
+                        self.tension_sdk.send_position_frame(tension_positions)
+                        
+                        # 更新共享数据
+                        with self._control_lock:
+                            self._last_tension_commands = tension_commands
+                            self._last_tension_positions = tension_positions
+                    
                     last_send_time = current_time
                     rate_count += 1
                     
@@ -1330,15 +1482,21 @@ def main():
     parser.add_argument('--hand', type=int, default=1, choices=[0, 1],
                         help='选择手: 0=左手, 1=右手')
     parser.add_argument('--channel', type=str, default=None,
-                        help='CAN通道')
+                        help='机械手和触觉传感器CAN通道 (默认: PCAN_USBBUS1)')
     parser.add_argument('--interface', type=str, default=None,
-                        help='CAN接口')
+                        help='CAN接口类型 (默认: pcan)')
+    parser.add_argument('--tension-channel', type=str, default=None,
+                        help='无刷拉力模块CAN通道 (默认: PCAN_USBBUS2)')
+    parser.add_argument('--tension-interface', type=str, default=None,
+                        help='无刷拉力模块CAN接口类型 (默认: pcan)')
     parser.add_argument('--serial-port', type=str, default=None,
                         help='控制器串口')
     parser.add_argument('--simulate', action='store_true',
                         help='使用模拟数据')
     parser.add_argument('--no-control', action='store_true',
                         help='禁用控制器')
+    parser.add_argument('--enable-tension', action='store_true',
+                        help='启用无刷拉力模块控制')
     parser.add_argument('--fps', type=int, default=60,
                         help='目标帧率')
     
@@ -1352,6 +1510,23 @@ def main():
     print("=" * 70)
     print(f" 触觉传感器与机械手控制集成系统 - {hand_name}")
     print("=" * 70)
+    print()
+    print("CAN通道配置:")
+    print(f"  机械手+触觉: {args.channel or CANConfig.CHANNEL}")
+    if args.enable_tension:
+        print(f"  无刷拉力模块: {args.tension_channel or CANConfig.TENSION_CHANNEL}")
+    print()
+    print("功能说明:")
+    print("  - 触觉传感器数据可视化")
+    print("  - 机械手位置/速度/力矩控制与反馈")
+    print("  - USB控制器输入映射")
+    if args.enable_tension:
+        print("  - 无刷拉力模块控制 (已启用，独立CAN接口)")
+        print("    * 拉力命令: 触觉传感器(0.8) + 关节电流(0.2)")
+        print("    * 位置命令: 关节位置映射到50-255")
+    else:
+        print("  - 无刷拉力模块控制 (未启用，使用 --enable-tension 启用)")
+    print()
     
     # 创建CAN管理器
     if args.simulate:
@@ -1374,6 +1549,28 @@ def main():
             # 启动控制器读取线程
             controller.start()
     
+    # 创建无刷拉力模块SDK（使用独立的CAN接口）
+    tension_sdk = None
+    if args.enable_tension and not args.simulate:
+        tension_channel = args.tension_channel or CANConfig.TENSION_CHANNEL
+        tension_interface = args.tension_interface or CANConfig.TENSION_INTERFACE
+        
+        print("初始化无刷拉力模块...")
+        print(f"  拉力模块CAN通道: {tension_channel}")
+        print(f"  机械手CAN通道: {args.channel or CANConfig.CHANNEL}")
+        
+        tension_sdk = BrushlessTensionSDK(
+            channel=tension_channel,
+            bustype=tension_interface,
+            bitrate=CANConfig.TENSION_BITRATE
+        )
+        if tension_sdk.connect():
+            tension_sdk.start_receive()
+            print("✓ 无刷拉力模块已启用")
+        else:
+            print("✗ 无刷拉力模块连接失败，将禁用拉力控制")
+            tension_sdk = None
+    
     try:
         if not can_manager.connect():
             print("CAN连接失败，切换到模拟模式...")
@@ -1382,7 +1579,7 @@ def main():
         
         can_manager.start()
         
-        visualizer = IntegratedVisualizer(can_manager, controller)
+        visualizer = IntegratedVisualizer(can_manager, controller, tension_sdk)
         visualizer.run()
         
     except KeyboardInterrupt:
@@ -1390,6 +1587,8 @@ def main():
     finally:
         if controller:
             controller.disconnect()
+        if tension_sdk:
+            tension_sdk.disconnect()
         can_manager.disconnect()
         
         stats = can_manager.get_stats()
